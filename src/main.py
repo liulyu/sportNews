@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import time
 from datetime import datetime, timezone, timedelta
 
 import yaml
@@ -11,7 +12,7 @@ import yaml
 # 让 `python src/main.py` 可直接运行(添加项目根到 sys.path)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from scrapers import fetch_all  # noqa: E402
+from scrapers import fetch_all, fetch_hupu_detail, fetch_zhibo8_detail  # noqa: E402
 from filter import filter_and_rank, normalize_title  # noqa: E402
 from llm import llm_judge  # noqa: E402
 from push import push_to_serverchan, push_test  # noqa: E402
@@ -102,10 +103,11 @@ def run_monitor(config: dict, state: State, dry_run: bool = False) -> int:
     else:
         state.mark_scrape_success()
 
-    # 8. 更新热度快照(对所有虎扑抓到的 item,无论是否通过)
+    # 8. 更新热度快照(对所有抓到的 item,无论是否通过)
     # 这是下次速度计算的基础,必须先于过滤
+    # 虎扑有 replies+likes,直播吧移动版有 replies(评论数),likes=0
     for it in items:
-        if it.source == "hupu":
+        if it.source in ("hupu", "zhibo8"):
             state.update_hotness(it.url, it.replies, it.likes)
 
     # 3. 过滤
@@ -132,24 +134,24 @@ def run_monitor(config: dict, state: State, dry_run: bool = False) -> int:
         print("[main] 无候选,跳过 LLM 与推送")
         return 0
 
-    # 4. LLM 总结(只对 Top-2 调用,控制成本)
-    llm_limit = rules.get("llm_daily_limit", 50)
-    top = candidates[:2]
+    # 4. LLM 总结(对所有候选调用,精炼标题+生成摘要)
+    #    先抓详情页正文,再调 LLM,这样 summary 基于正文而非标题改写
+    llm_limit = rules.get("llm_daily_limit", 150)
+    top = candidates  # 全部候选都调 LLM
+    for c in top:
+        try:
+            if c.source == "hupu":
+                c.content = fetch_hupu_detail(c.url)
+            elif c.source == "zhibo8":
+                c.content = fetch_zhibo8_detail(c.url)
+            if c.content:
+                print(f"[main] 详情页正文 {len(c.content)}字: {c.url}")
+            else:
+                print(f"[main] 详情页正文为空,LLM 仅基于标题判断: {c.url}")
+            time.sleep(0.5)  # 礼貌延迟
+        except Exception as e:
+            print(f"[main] 抓详情页失败: {type(e).__name__}: {e}")
     summaries = [llm_judge(c, state, llm_limit) for c in top]
-    # 剩余候选直接以原 title 推送(important=True)
-    for c in candidates[2:]:
-        summaries.append({
-            "important": True,
-            "score": 5,
-            "headline": c.title[:32],
-            "summary": "",
-            "url": c.url,
-            "source": c.source,
-            "section": c.section,
-            "replies": c.replies,
-            "likes": c.likes,
-            "fetched_at": c.fetched_at,
-        })
 
     # 5. 推送
     daily_limit = rules.get("daily_push_limit", 5)
@@ -161,7 +163,7 @@ def run_monitor(config: dict, state: State, dry_run: bool = False) -> int:
             print("[main] 已达 Server酱 日限,停止推送")
             break
         normalized = normalize_title(s.get("headline", "") + s.get("summary", ""))
-        status = push_to_serverchan(s, state, normalized)
+        status = push_to_serverchan(s, state, normalized, daily_limit=daily_limit)
         if status == "quota_exhausted":
             print("[main] Server酱 配额耗尽,停止本次推送")
             break

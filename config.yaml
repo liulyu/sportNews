@@ -13,32 +13,31 @@ sources:
         name: 中国足球
   zhibo8:
     enabled: true
-    sections:
-      - code: nba
-        name: NBA
-      - code: zuqiu
-        name: 足球
-      - code: dianjing
-        name: 电竞
+    # 移动版首页 m.zhibo8.com/news.htm 一次返回全部三类新闻
+    # accept_types 控制保留哪些(nba=篮球 zuqiu=足球 game=电竞)
+    # 不配置或为空则全部保留
+    accept_types: [nba, zuqiu, game]
+    # 批量查评论数的条数上限(控制请求数,默认 30)
+    comment_count_limit: 30
   
 # 规则阈值
 rules:
   # 虎扑热度阈值(基于列表页 X亮Y回复)
-  min_replies_hupu: 50
+  min_replies_hupu: 30
   min_likes_hupu: 10
   # 蹿升速度(用真实时间戳计算,容忍 cron 不准点)
-  velocity_replies_per_min: 8
-  velocity_likes_per_min: 2
+  velocity_replies_per_min: 1000
+  velocity_likes_per_min: 1000
   # 推送节流
-  max_push_per_run: 2
-  daily_push_limit: 5             # Server酱 免费版硬上限
-  dedup_window_hours: 6
+  max_push_per_run: 5
+  daily_push_limit: 5000             # Server酱 免费版硬上限
+  dedup_window_hours: 12
   # 冷启动保护:首日(无 state.pushed)所有阈值 ×2
-  cold_start_multiplier: 2.0
+  cold_start_multiplier: 1.5
   # 跨源标题相似度去重
   cross_source_dedup_threshold: 0.6  # 2-gram Jaccard ≥ 0.6 视为同事件
   # LLM 软限流
-  llm_daily_limit: 50
+  llm_daily_limit: 150
 
 # 即时通道:命中以下关键词且未推送过 → 立即候选(不走热度阈值)
 # 每日上限 2 条,防止刷屏

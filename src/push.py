@@ -65,6 +65,7 @@ def push_to_serverchan(
     state: State,
     normalized: str,
     sendkey: str | None = None,
+    daily_limit: int = 5,
 ) -> str:
     """推送单条消息。
 
@@ -73,15 +74,17 @@ def push_to_serverchan(
     - "attempted": 尝试过但状态未知(超时/4xx/5xx 重试后仍失败)
     - "quota_exhausted": Server酱 配额耗尽,本次运行应停止
     - "no_key": 未配置 sendkey(本地 dry-run 用)
+
+    daily_limit: Server酱 日推送上限(免费版 5,Turbo 5000),由 main.py 从 config 注入
     """
     key = (sendkey or os.getenv("SERVERCHAN_KEY", "")).strip()
     if not key:
         print("[push] 未配置 SERVERCHAN_KEY,跳过推送")
         return "no_key"
 
-    # 调用前检查日限
-    if state.daily_pushed_count() >= 5:
-        print("[push] 已达 Server酱 日限,跳过")
+    # 调用前检查日限(由 main.py 从 config.yaml 的 daily_push_limit 注入)
+    if state.daily_pushed_count() >= daily_limit:
+        print(f"[push] 已达 Server酱 日限 ({daily_limit}),跳过")
         return "quota_exhausted"
 
     title = (item.get("headline") or item.get("title", ""))[:32]

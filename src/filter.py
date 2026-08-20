@@ -117,8 +117,9 @@ def filter_and_rank(
             # 即时通道直接进,不走热度
             continue
 
-        # 虎扑走热度/速度路径
-        if item.source == "hupu":
+        # 虎扑 + 直播吧走热度/速度路径
+        # (直播吧切到移动版后,通过评论数 AJAX 拿到 replies,逻辑相同)
+        if item.source in ("hupu", "zhibo8"):
             score = _score_item(item)
 
             # 加权关键词:阈值 ×0.5
@@ -159,9 +160,6 @@ def filter_and_rank(
             elif rising:
                 velocity_candidates.append((item, normalized, score))
                 seen_normalized_this_run.append(normalized)
-
-        # 直播吧无热度数据:只走即时通道(已在上文处理)
-        # 此处 item 被丢弃
 
     # 排序:即时 > 绝对热度 ×2 > 蹿升 > 普通绝对热度
     # 用 (priority_class, score) 排序,priority_class 越小越优先
