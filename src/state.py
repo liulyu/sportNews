@@ -1,0 +1,260 @@
+"""状态持久化(JSON 文件 + git commit)。"""
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+from datetime import datetime, timezone, timedelta
+from typing import Any
+
+BEIJING_TZ = timezone(timedelta(hours=8))
+
+DEFAULT_PATH = "data/state.json"
+
+# 保留策略
+PUSHED_TTL_HOURS = 24
+HOTNESS_KEEP_SNAPSHOTS = 12
+DAILY_KEEP_DAYS = 7
+
+
+def _now_iso() -> str:
+    return datetime.now(BEIJING_TZ).isoformat(timespec="seconds")
+
+
+def _today_key() -> str:
+    """北京时间日期 YYYY-MM-DD,作为 daily_* 字典 key。"""
+    return datetime.now(BEIJING_TZ).strftime("%Y-%m-%d")
+
+
+def _parse_iso(s: str) -> datetime | None:
+    if not s:
+        return None
+    try:
+        # Python 3.11+ fromisoformat 支持时区
+        return datetime.fromisoformat(s)
+    except ValueError:
+        return None
+
+
+class State:
+    def __init__(self) -> None:
+        self.last_run: str = ""
+        self.health: dict = {
+            "last_success": "",
+            "consecutive_scrape_failures": 0,
+            "scrape_warnings": [],
+        }
+        self.daily_pushed: dict[str, int] = {}
+        self.daily_instant: dict[str, int] = {}
+        self.daily_llm_calls: dict[str, int] = {}
+        # url -> {"ts": iso, "status": "pushed"|"attempted", "normalized": str}
+        self.pushed: dict[str, dict] = {}
+        self.pushed_normalized: list[str] = []
+        # url -> [{"t": iso, "replies": int, "likes": int}, ...]
+        self.hotness_history: dict[str, list] = {}
+
+    # ---- 加载/保存 ----
+    @classmethod
+    def load(cls, path: str = DEFAULT_PATH) -> "State":
+        st = cls()
+        if not os.path.exists(path):
+            return st
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            st.last_run = data.get("last_run", "")
+            st.health = data.get("health", st.health)
+            st.daily_pushed = data.get("daily_pushed", {})
+            st.daily_instant = data.get("daily_instant", {})
+            st.daily_llm_calls = data.get("daily_llm_calls", {})
+            st.pushed = data.get("pushed", {})
+            st.pushed_normalized = data.get("pushed_normalized", [])
+            st.hotness_history = data.get("hotness_history", {})
+        except (OSError, json.JSONDecodeError) as e:
+            print(f"[state] 加载 {path} 失败,从空状态开始: {e}")
+        return st
+
+    def to_dict(self) -> dict:
+        return {
+            "last_run": self.last_run,
+            "health": self.health,
+            "daily_pushed": self.daily_pushed,
+            "daily_instant": self.daily_instant,
+            "daily_llm_calls": self.daily_llm_calls,
+            "pushed": self.pushed,
+            "pushed_normalized": self.pushed_normalized,
+            "hotness_history": self.hotness_history,
+        }
+
+    def save(self, path: str = DEFAULT_PATH) -> None:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(self.to_dict(), f, ensure_ascii=False, indent=2)
+
+    # ---- 状态查询 ----
+    def is_cold_start(self) -> bool:
+        return not self.pushed
+
+    def daily_pushed_count(self) -> int:
+        return self.daily_pushed.get(_today_key(), 0)
+
+    def daily_instant_count(self) -> int:
+        return self.daily_instant.get(_today_key(), 0)
+
+    def daily_llm_count(self) -> int:
+        return self.daily_llm_calls.get(_today_key(), 0)
+
+    def is_url_pushed_recently(self, url: str, window_hours: int) -> bool:
+        info = self.pushed.get(url)
+        if not info:
+            return False
+        ts = _parse_iso(info.get("ts", ""))
+        if not ts:
+            return False
+        age = (datetime.now(BEIJING_TZ) - ts).total_seconds() / 3600
+        return age < window_hours
+
+    def is_normalized_pushed(self, normalized: str, threshold: float, jaccard_fn) -> bool:
+        """与已推送 normalized 比对,Jaccard ≥ threshold 视为重复。jaccard_fn(a, b) -> float。"""
+        for prev in self.pushed_normalized:
+            try:
+                if jaccard_fn(normalized, prev) >= threshold:
+                    return True
+            except Exception:
+                continue
+        return False
+
+    # ---- 状态写入 ----
+    def mark_pushed(self, url: str, normalized: str, status: str) -> None:
+        ts = _now_iso()
+        self.pushed[url] = {"ts": ts, "status": status, "normalized": normalized}
+        if status == "pushed":
+            if normalized and normalized not in self.pushed_normalized:
+                self.pushed_normalized.append(normalized)
+            self.daily_pushed[_today_key()] = self.daily_pushed.get(_today_key(), 0) + 1
+        elif status == "attempted":
+            # 不计入 daily_pushed(不占配额),只记 attempted 标记
+            pass
+
+    def mark_instant(self) -> None:
+        self.daily_instant[_today_key()] = self.daily_instant.get(_today_key(), 0) + 1
+
+    def mark_llm_call(self) -> None:
+        self.daily_llm_calls[_today_key()] = self.daily_llm_calls.get(_today_key(), 0) + 1
+
+    def update_hotness(self, url: str, replies: int, likes: int) -> None:
+        self.hotness_history.setdefault(url, []).append(
+            {"t": _now_iso(), "replies": replies, "likes": likes}
+        )
+
+    def get_last_hotness(self, url: str) -> dict | None:
+        hist = self.hotness_history.get(url, [])
+        return hist[-1] if hist else None
+
+    def get_velocity(self, url: str) -> tuple[float, float] | None:
+        """返回 (replies_per_min, likes_per_min) 或 None(无 2 个快照)。"""
+        hist = self.hotness_history.get(url, [])
+        if len(hist) < 2:
+            return None
+        prev = hist[-2]
+        cur = hist[-1]
+        prev_ts = _parse_iso(prev.get("t", ""))
+        cur_ts = _parse_iso(cur.get("t", ""))
+        if not prev_ts or not cur_ts:
+            return None
+        dt_min = (cur_ts - prev_ts).total_seconds() / 60
+        if dt_min <= 0:
+            return None
+        v_r = (cur.get("replies", 0) - prev.get("replies", 0)) / dt_min
+        v_l = (cur.get("likes", 0) - prev.get("likes", 0)) / dt_min
+        return v_r, v_l
+
+    # ---- 健康状态 ----
+    def mark_run_started(self) -> None:
+        self.last_run = _now_iso()
+
+    def mark_scrape_success(self) -> None:
+        self.health["last_success"] = _now_iso()
+        self.health["consecutive_scrape_failures"] = 0
+
+    def mark_scrape_failure(self, msg: str = "") -> None:
+        self.health["consecutive_scrape_failures"] = (
+            self.health.get("consecutive_scrape_failures", 0) + 1
+        )
+        if msg:
+            warns = self.health.setdefault("scrape_warnings", [])
+            warns.append(f"{_now_iso()} {msg}")
+            self.health["scrape_warnings"] = warns[-10:]
+
+    # ---- 清理 ----
+    def cleanup(self) -> None:
+        now = datetime.now(BEIJING_TZ)
+
+        # pushed: 超过 PUSHED_TTL_HOURS 删除
+        new_pushed = {}
+        for url, info in self.pushed.items():
+            ts = _parse_iso(info.get("ts", ""))
+            if ts and (now - ts).total_seconds() / 3600 < PUSHED_TTL_HOURS:
+                new_pushed[url] = info
+        self.pushed = new_pushed
+
+        # pushed_normalized: 只保留仍对应 pushed 中的 normalized
+        kept_norm = {info.get("normalized") for info in self.pushed.values() if info.get("normalized")}
+        self.pushed_normalized = [n for n in self.pushed_normalized if n in kept_norm]
+
+        # hotness_history: 每个 URL 保留最近 N 个快照
+        for url in list(self.hotness_history.keys()):
+            self.hotness_history[url] = self.hotness_history[url][-HOTNESS_KEEP_SNAPSHOTS:]
+            if not self.hotness_history[url]:
+                del self.hotness_history[url]
+
+        # daily_*: 保留最近 N 天
+        cutoff = (now - timedelta(days=DAILY_KEEP_DAYS)).strftime("%Y-%m-%d")
+        for d in (self.daily_pushed, self.daily_instant, self.daily_llm_calls):
+            for k in list(d.keys()):
+                if k < cutoff:
+                    del d[k]
+
+
+def save_and_commit(state: State, path: str = DEFAULT_PATH) -> None:
+    """写文件 + git add + commit + push。失败时 log 不抛异常。"""
+    state.save(path)
+
+    # 仅当 git 仓库存在时尝试 commit
+    if not os.path.isdir(".git"):
+        return
+
+    cmds = [
+        ["git", "config", "user.name", "github-actions[bot]"],
+        ["git", "config", "user.email", "github-actions[bot]@users.noreply.github.com"],
+        ["git", "add", path],
+    ]
+    for cmd in cmds:
+        try:
+            subprocess.run(cmd, check=False, capture_output=True, timeout=15)
+        except Exception as e:
+            print(f"[state] git cmd {cmd[1]} 异常: {e}")
+            return
+
+    # 检查是否有变更
+    diff = subprocess.run(
+        ["git", "diff", "--staged", "--quiet"],
+        capture_output=True,
+        timeout=15,
+    )
+    if diff.returncode == 0:
+        # 无变更
+        return
+
+    try:
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        subprocess.run(
+            ["git", "commit", "-m", f"state: {ts}"],
+            check=False, capture_output=True, timeout=30,
+        )
+        subprocess.run(
+            ["git", "push"],
+            check=False, capture_output=True, timeout=60,
+        )
+    except Exception as e:
+        print(f"[state] git push 失败(state 未上云,下次重试): {e}")

@@ -1,0 +1,74 @@
+# 订阅板块
+sources:
+  hupu:
+    enabled: true
+    sections:
+      - code: all-nba
+        name: NBA
+      - code: all-gambia    # 步行街热帖(综合大新闻)
+        name: 步行街
+      - code: all-cba
+        name: CBA
+      - code: all-csl
+        name: 中国足球
+  zhibo8:
+    enabled: true
+    sections:
+      - code: nba
+        name: NBA
+      - code: zuqiu
+        name: 足球
+      - code: dianjing
+        name: 电竞
+  
+# 规则阈值
+rules:
+  # 虎扑热度阈值(基于列表页 X亮Y回复)
+  min_replies_hupu: 50
+  min_likes_hupu: 10
+  # 蹿升速度(用真实时间戳计算,容忍 cron 不准点)
+  velocity_replies_per_min: 8
+  velocity_likes_per_min: 2
+  # 推送节流
+  max_push_per_run: 2
+  daily_push_limit: 5             # Server酱 免费版硬上限
+  dedup_window_hours: 6
+  # 冷启动保护:首日(无 state.pushed)所有阈值 ×2
+  cold_start_multiplier: 2.0
+  # 跨源标题相似度去重
+  cross_source_dedup_threshold: 0.6  # 2-gram Jaccard ≥ 0.6 视为同事件
+  # LLM 软限流
+  llm_daily_limit: 50
+
+# 即时通道:命中以下关键词且未推送过 → 立即候选(不走热度阈值)
+# 每日上限 2 条,防止刷屏
+instant_keywords:
+  - 官宣
+  - 签约
+  - 交易达成
+  - 退役
+  - 重伤
+  - 赛季报销
+  - 夺冠
+  - 选秀
+  - 解雇
+  - 下课
+  - 世界纪录
+
+# 加权关键词(降低热度阈值至 50%)
+keyword_boost:
+  - 重磅
+  - Shams
+  - Haynes
+  - Stein
+  - 总冠军
+  - 世界杯
+  - 伤病
+  - 复出
+
+# 黑名单(直接跳过)
+keyword_block:
+  - 招聘
+  - 福利
+  - 中奖
+  - 抽奖

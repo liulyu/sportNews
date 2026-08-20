@@ -1,0 +1,46 @@
+name: Sport News Monitor
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'   # 每 10 分钟(UTC,北京时间 -8)
+  workflow_dispatch:          # 支持手动触发
+
+permissions:
+  contents: write             # 允许 commit state.json
+
+# 串行化:防止上一次未完成时下一次并发导致 state 冲突
+concurrency:
+  group: monitor
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Run monitor
+        env:
+          SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          TZ: Asia/Shanghai
+        run: python src/main.py
+
+      - name: Commit state
+        if: always()        # 即使 Run 失败也尝试保存 hotness 快照
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/state.json 2>/dev/null || exit 0
+          git diff --staged --quiet || git commit -m "state: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+          git push

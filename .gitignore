@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.env
+*.local
+.venv/
+data/state.local.json
+*.log
