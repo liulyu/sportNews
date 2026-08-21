@@ -1,4 +1,4 @@
-"""规则过滤 + 跨源去重 + 蹿升速度 + 节流截断。"""
+"""规则过滤 + 跨源去重 + 蹿升速度 + 新鲜度窗口 + 节流截断。"""
 from __future__ import annotations
 
 import re
@@ -42,6 +42,8 @@ def jaccard(a: str, b: str, n: int = 2) -> float:
 
 
 def _matches_any(text: str, keywords: list[str]) -> bool:
+    if not keywords:
+        return False
     t = text.lower()
     return any(k.lower() in t for k in keywords)
 
@@ -55,7 +57,6 @@ def filter_and_rank(
     items: List[NewsItem],
     state: State,
     rules: dict,
-    instant_keywords: list[str],
     keyword_boost: list[str],
     keyword_block: list[str],
 ) -> List[NewsItem]:
@@ -73,6 +74,7 @@ def filter_and_rank(
     daily_limit = rules.get("daily_push_limit", 5)
     dedup_hours = rules.get("dedup_window_hours", 6)
     cross_threshold = rules.get("cross_source_dedup_threshold", 0.6)
+    freshness_hours = rules.get("freshness_hours", 6)
 
     # 应用冷启动倍率
     eff_min_replies = min_replies * (cold_mul if cold else 1.0)
@@ -81,16 +83,11 @@ def filter_and_rank(
     daily_pushed_so_far = state.daily_pushed_count()
 
     # 候选分类
-    instant_candidates: list[tuple[NewsItem, str]] = []  # (item, normalized)
-    hot_candidates: list[tuple[NewsItem, str, int]] = []  # + score
-    velocity_candidates: list[tuple[NewsItem, str, int]] = []  # + score
+    hot_candidates: list[tuple[NewsItem, str, int]] = []   # (item, normalized, score)
+    velocity_candidates: list[tuple[NewsItem, str, int]] = []
 
     # 本次运行内已选 normalized(防止同源同时报同事件)
     seen_normalized_this_run: list[str] = []
-
-    # 即时通道当日上限 2 条
-    instant_used_today = state.daily_instant_count()
-    instant_budget = max(0, 2 - instant_used_today)
 
     for item in items:
         # 黑名单
@@ -110,15 +107,12 @@ def filter_and_rank(
         if any(jaccard(normalized, n) >= cross_threshold for n in seen_normalized_this_run):
             continue
 
-        # 即时通道
-        if _matches_any(item.title, instant_keywords) and instant_budget > 0:
-            instant_candidates.append((item, normalized))
-            seen_normalized_this_run.append(normalized)
-            # 即时通道直接进,不走热度
+        # 新鲜度窗口:之前已经见过且超过 freshness_hours 的老新闻,直接跳过
+        age = state.get_age_hours(item.url)
+        if age is not None and age > freshness_hours:
             continue
 
         # 虎扑 + 直播吧走热度/速度路径
-        # (直播吧切到移动版后,通过评论数 AJAX 拿到 replies,逻辑相同)
         if item.source in ("hupu", "zhibo8"):
             score = _score_item(item)
 
@@ -130,8 +124,6 @@ def filter_and_rank(
                 this_min_replies = eff_min_replies
                 this_min_likes = eff_min_likes
 
-            # 绝对热度:首次见到但热度 ≥ 阈值 ×2 → 直推
-            # 否则正常阈值
             velocity = state.get_velocity(item.url)
             has_history = bool(state.get_last_hotness(item.url))
 
@@ -161,11 +153,8 @@ def filter_and_rank(
                 velocity_candidates.append((item, normalized, score))
                 seen_normalized_this_run.append(normalized)
 
-    # 排序:即时 > 绝对热度 ×2 > 蹿升 > 普通绝对热度
-    # 用 (priority_class, score) 排序,priority_class 越小越优先
+    # 排序:绝对热度 > 蹿升
     ranked: list[tuple[int, int, NewsItem, str]] = []
-    for it, n in instant_candidates:
-        ranked.append((0, _score_item(it), it, n))
     for it, n, s in hot_candidates:
         ranked.append((1, s, it, n))
     for it, n, s in velocity_candidates:
@@ -179,12 +168,11 @@ def filter_and_rank(
     for _, _, it, _ in ranked:
         if pushed_in_run >= max_push:
             break
-        # 当日已推 ≥ daily_limit - 1 时,只允许 1 条且必须是即时通道或热度 ×3
+        # 当日已推 ≥ daily_limit - 1 时,只允许再推 1 条且得分必须达阈值 ×3(防止刷屏)
         if daily_pushed_so_far >= daily_limit - 1:
             if pushed_in_run >= 1:
                 break
-            is_instant = any(it.url == x[0].url for x in instant_candidates)
-            if not is_instant and _score_item(it) < eff_min_replies * 3:
+            if _score_item(it) < eff_min_replies * 3:
                 continue
         result.append(it)
         pushed_in_run += 1

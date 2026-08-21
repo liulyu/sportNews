@@ -116,7 +116,6 @@ def run_monitor(config: dict, state: State, dry_run: bool = False) -> int:
         items,
         state,
         rules,
-        config.get("instant_keywords", []),
         config.get("keyword_boost", []),
         config.get("keyword_block", []),
     )
@@ -152,6 +151,16 @@ def run_monitor(config: dict, state: State, dry_run: bool = False) -> int:
         except Exception as e:
             print(f"[main] 抓详情页失败: {type(e).__name__}: {e}")
     summaries = [llm_judge(c, state, llm_limit) for c in top]
+
+    # 补全 content / fetched_at（LLM fallback 路径会带，但正常路径返回 dict 不含 content）
+    for c, s in zip(top, summaries):
+        s.setdefault("content", c.content or "")
+        s.setdefault("fetched_at", c.fetched_at or "")
+        s.setdefault("url", c.url)
+        s.setdefault("source", c.source)
+        s.setdefault("section", c.section)
+        s.setdefault("replies", c.replies)
+        s.setdefault("likes", c.likes)
 
     # 5. 推送
     daily_limit = rules.get("daily_push_limit", 5)

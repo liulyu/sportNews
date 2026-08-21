@@ -29,30 +29,17 @@ rules:
   velocity_replies_per_min: 1000
   velocity_likes_per_min: 1000
   # 推送节流
-  max_push_per_run: 5
+  max_push_per_run: 10
   daily_push_limit: 5000             # Server酱 免费版硬上限
   dedup_window_hours: 12
+  # 新鲜度窗口:首次出现在快照里超过 N 小时的新闻直接跳过(不推旧闻)
+  freshness_hours: 2
   # 冷启动保护:首日(无 state.pushed)所有阈值 ×2
   cold_start_multiplier: 1.5
   # 跨源标题相似度去重
   cross_source_dedup_threshold: 0.6  # 2-gram Jaccard ≥ 0.6 视为同事件
   # LLM 软限流
   llm_daily_limit: 150
-
-# 即时通道:命中以下关键词且未推送过 → 立即候选(不走热度阈值)
-# 每日上限 2 条,防止刷屏
-instant_keywords:
-  - 官宣
-  - 签约
-  - 交易达成
-  - 退役
-  - 重伤
-  - 赛季报销
-  - 夺冠
-  - 选秀
-  - 解雇
-  - 下课
-  - 世界纪录
 
 # 加权关键词(降低热度阈值至 50%)
 keyword_boost:
@@ -64,6 +51,17 @@ keyword_boost:
   - 世界杯
   - 伤病
   - 复出
+  - 官宣
+  - 签约
+  - 交易达成
+  - 退役
+  - 重伤
+  - 赛季报销
+  - 夺冠
+  - 选秀
+  - 解雇
+  - 下课
+  - 世界纪录
 
 # 黑名单(直接跳过)
 keyword_block:

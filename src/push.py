@@ -17,21 +17,39 @@ def _build_desp(item: dict) -> str:
     section = item.get("section", "")
     replies = item.get("replies", 0)
     likes = item.get("likes", 0)
-    summary = item.get("summary", "").strip()
+    headline = item.get("headline", "")
+    summary = (item.get("summary") or "").strip()
     url = item.get("url", "")
     fetched_at = item.get("fetched_at", "")
+    content = (item.get("content") or "").strip()
 
     heat_line = "📊 热度:"
     if source == "hupu":
         heat_line += f"虎扑 {replies}回复 {likes}亮"
     elif source == "zhibo8":
-        heat_line += "直播吧 关键词通道"
+        heat_line += "直播吧"
+        if replies:
+            heat_line += f" {replies}评论"
     else:
         heat_line += f"{replies}回复 {likes}亮"
 
-    summary_block = f"\n\n{summary}\n" if summary else "\n"
+    # 第二层兜底:如果 summary 空,用 content 截 150 字;再空就用标题+板块说明
+    if not summary:
+        if content:
+            compact = " ".join(content.split())
+            summary = compact[:150] + ("…" if len(compact) > 150 else "")
+        else:
+            heat_parts = []
+            if replies:
+                heat_parts.append(f"{replies}回复")
+            if likes:
+                heat_parts.append(f"{likes}亮")
+            heat_str = "、".join(heat_parts) or "热度未知"
+            summary = f"{headline}。({heat_str}，{section})"
+
+    summary_block = f"\n\n{summary}\n"
     return (
-        f"## {item.get('headline', '')}\n"
+        f"## {headline}\n"
         f"{summary_block}"
         f"\n{heat_line}\n"
         f"🔗 [查看原文]({url})\n"

@@ -93,18 +93,37 @@ category 可选值(只能选一个):
 
 
 def _fallback(item: NewsItem, reason: str) -> dict:
-    """LLM 不可用时的降级:important=True,headline=原标题,category 按源级映射兜底。"""
+    """LLM 不可用时的降级:important=True,headline=原标题,category 按源级映射兜底。
+    summary 优先用抓取到的正文前 150 字,退而求其次用标题+热度描述,保证推送有内容。"""
+    # 从正文或标题拼一个兜底 summary
+    content = (item.content or "").strip()
+    if content:
+        # 去掉多余换行,截取前 ~150 字
+        compact = " ".join(content.split())
+        summary = compact[:150] + ("…" if len(compact) > 150 else "")
+    else:
+        # 无正文时:标题 + 热度一句话
+        heat_parts = []
+        if item.replies:
+            heat_parts.append(f"{item.replies}回复")
+        if item.likes:
+            heat_parts.append(f"{item.likes}亮")
+        heat_str = "、".join(heat_parts) or "热度未知"
+        summary = f"{item.title}。({heat_str}，{item.section})"
+        if len(summary) > 150:
+            summary = summary[:149] + "…"
     return {
         "important": True,
         "score": 5,
         "category": _infer_category_by_source(item),
         "headline": item.title,
-        "summary": "",
+        "summary": summary,
         "url": item.url,
         "source": item.source,
         "section": item.section,
         "replies": item.replies,
         "likes": item.likes,
+        "fetched_at": item.fetched_at,
         "_fallback": reason,
     }
 

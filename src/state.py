@@ -169,6 +169,20 @@ class State:
         v_l = (cur.get("likes", 0) - prev.get("likes", 0)) / dt_min
         return v_r, v_l
 
+    def get_first_seen(self, url: str) -> datetime | None:
+        """该 URL 首次被抓取快照的时间(北京时间)。无记录返回 None。"""
+        hist = self.hotness_history.get(url, [])
+        if not hist:
+            return None
+        return _parse_iso(hist[0].get("t", ""))
+
+    def get_age_hours(self, url: str) -> float | None:
+        """首次出现距今多少小时。无记录返回 None。"""
+        first = self.get_first_seen(url)
+        if not first:
+            return None
+        return (datetime.now(BEIJING_TZ) - first).total_seconds() / 3600
+
     # ---- 健康状态 ----
     def mark_run_started(self) -> None:
         self.last_run = _now_iso()
