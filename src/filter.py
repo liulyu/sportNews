@@ -59,6 +59,7 @@ def filter_and_rank(
     rules: dict,
     keyword_boost: list[str],
     keyword_block: list[str],
+    skip_freshness: bool = False,
 ) -> List[NewsItem]:
     """返回通过过滤的候选列表(已排序、已截断)。"""
     if not items:
@@ -108,9 +109,11 @@ def filter_and_rank(
             continue
 
         # 新鲜度窗口:之前已经见过且超过 freshness_hours 的老新闻,直接跳过
-        age = state.get_age_hours(item.url)
-        if age is not None and age > freshness_hours:
-            continue
+        # 静音模式下(QUIET)跳过这一判断——夜间新闻会被攒进晨间汇总,不该被新鲜度过滤掉
+        if not skip_freshness:
+            age = state.get_age_hours(item.url)
+            if age is not None and age > freshness_hours:
+                continue
 
         # 虎扑 + 直播吧走热度/速度路径
         if item.source in ("hupu", "zhibo8"):

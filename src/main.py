@@ -12,10 +12,10 @@ import yaml
 # 让 `python src/main.py` 可直接运行(添加项目根到 sys.path)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from scrapers import fetch_all, fetch_hupu_detail, fetch_zhibo8_detail  # noqa: E402
+from scrapers import NewsItem, fetch_all, fetch_hupu_detail, fetch_zhibo8_detail  # noqa: E402
 from filter import filter_and_rank, normalize_title  # noqa: E402
 from llm import llm_judge  # noqa: E402
-from push import push_to_serverchan, push_test  # noqa: E402
+from push import push_to_serverchan, push_to_serverchan_batch, push_test  # noqa: E402
 from state import State, save_and_commit, BEIJING_TZ  # noqa: E402
 
 CONFIG_PATH = "config.yaml"
@@ -110,14 +110,48 @@ def run_monitor(config: dict, state: State, dry_run: bool = False) -> int:
         if it.source in ("hupu", "zhibo8"):
             state.update_hotness(it.url, it.replies, it.likes)
 
-    # 3. 过滤
+    # 3. 模式判断(必须先于过滤,决定是否跳过新鲜度窗口等逻辑)
     rules = config.get("rules", {})
+    quiet_start = int(rules.get("quiet_start_hour", 23))
+    quiet_end = int(rules.get("quiet_end_hour", 7))
+    morning_cap = int(rules.get("morning_queue_cap", 50))
+    mode = state.get_run_mode(quiet_start, quiet_end)
+    now_beijing = datetime.now(BEIJING_TZ)
+    print(f"[main] 运行模式: {mode} (北京 {now_beijing.strftime('%H:%M')})")
+
+    # 4. 准备过滤输入(MORNING 模式下把 night_queue 先转成 NewsItem 合并到 items 再过滤,
+    #    这样跨源标题相似度去重、关键词屏蔽等会同时作用于夜间新闻和新抓的新闻)
+    filter_input: list[NewsItem] = list(items)
+    if mode == "MORNING" and state.night_queue:
+        existing = {it.url for it in filter_input}
+        for d in state.night_queue:
+            if d.get("url") in existing:
+                continue
+            filter_input.append(NewsItem(
+                source=d.get("source", ""),
+                section=d.get("section", ""),
+                title=d.get("title", ""),
+                url=d.get("url", ""),
+                replies=int(d.get("replies", 0) or 0),
+                likes=int(d.get("likes", 0) or 0),
+                fetched_at=d.get("fetched_at", ""),
+                content="",
+            ))
+            existing.add(d.get("url", ""))
+        print(f"[main] 晨间汇总:夜间队列 {len(state.night_queue)} 条 + 本次抓取 {len(items)} 条 → 合并 {len(filter_input)} 条再过滤")
+
+    # 5. 过滤
+    #   - QUIET: 跳过新鲜度窗口,夜间新闻不该被 freshness_hours 挡住
+    #   - MORNING: 跳过新鲜度(夜间新闻已经在队列里挂了 N 小时,不能用 2h 窗口拦)
+    #   - NORMAL: 正常新鲜度(freshness_hours 生效)
+    skip_fresh = mode in ("QUIET", "MORNING")
     candidates = filter_and_rank(
-        items,
+        filter_input,
         state,
         rules,
         config.get("keyword_boost", []),
         config.get("keyword_block", []),
+        skip_freshness=skip_fresh,
     )
     print(f"[main] 过滤后候选 {len(candidates)} 条")
 
@@ -127,33 +161,41 @@ def run_monitor(config: dict, state: State, dry_run: bool = False) -> int:
                 f"[候选] {c.source}/{c.section} | replies={c.replies} likes={c.likes} "
                 f"| {c.title[:50]} | {c.url}"
             )
+        print(f"[dry-run] night_queue 当前 {len(state.night_queue)} 条")
+        return 0
+
+    # === 模式 1: QUIET 静音(23:00 ~ 06:59) ===
+    if mode == "QUIET":
+        if candidates:
+            state.enqueue_night_candidates(candidates, morning_cap)
+            print(f"[main] 静音模式:入队 {len(candidates)} 条,队列当前 {len(state.night_queue)} 条")
+        else:
+            print("[main] 静音模式:无新候选")
         return 0
 
     if not candidates:
         print("[main] 无候选,跳过 LLM 与推送")
         return 0
 
-    # 4. LLM 总结(对所有候选调用,精炼标题+生成摘要)
-    #    先抓详情页正文,再调 LLM,这样 summary 基于正文而非标题改写
+    # 6. LLM 总结(抓详情页 + 调 LLM)
     llm_limit = rules.get("llm_daily_limit", 150)
-    top = candidates  # 全部候选都调 LLM
-    for c in top:
+    for c in candidates:
         try:
             if c.source == "hupu":
                 c.content = fetch_hupu_detail(c.url)
             elif c.source == "zhibo8":
                 c.content = fetch_zhibo8_detail(c.url)
             if c.content:
-                print(f"[main] 详情页正文 {len(c.content)}字: {c.url}")
+                pass
             else:
                 print(f"[main] 详情页正文为空,LLM 仅基于标题判断: {c.url}")
             time.sleep(0.5)  # 礼貌延迟
         except Exception as e:
             print(f"[main] 抓详情页失败: {type(e).__name__}: {e}")
-    summaries = [llm_judge(c, state, llm_limit) for c in top]
+    summaries = [llm_judge(c, state, llm_limit) for c in candidates]
 
-    # 补全 content / fetched_at（LLM fallback 路径会带，但正常路径返回 dict 不含 content）
-    for c, s in zip(top, summaries):
+    # 补全 content / fetched_at
+    for c, s in zip(candidates, summaries):
         s.setdefault("content", c.content or "")
         s.setdefault("fetched_at", c.fetched_at or "")
         s.setdefault("url", c.url)
@@ -162,20 +204,62 @@ def run_monitor(config: dict, state: State, dry_run: bool = False) -> int:
         s.setdefault("replies", c.replies)
         s.setdefault("likes", c.likes)
 
-    # 5. 推送
+    # 6. 按 important 收集
     daily_limit = rules.get("daily_push_limit", 5)
+    batch: list[dict] = []
     for s in summaries:
         if not s.get("important"):
             print(f"[main] LLM 判定不重要,跳过: {s.get('headline')}")
             continue
-        if state.daily_pushed_count() >= daily_limit:
+        if state.daily_pushed_count() >= daily_limit and not batch:
             print("[main] 已达 Server酱 日限,停止推送")
             break
-        normalized = normalize_title(s.get("headline", "") + s.get("summary", ""))
-        status = push_to_serverchan(s, state, normalized, daily_limit=daily_limit)
+        s["_normalized"] = normalize_title(s.get("headline", "") + s.get("summary", ""))
+        batch.append(s)
+
+    # MORNING 模式下:不受 max_push_per_run 限制,全部打包发
+    if mode != "MORNING":
+        max_push = rules.get("max_push_per_run", 10)
+        if len(batch) > max_push:
+            print(f"[main] 候选 {len(batch)} 条超过 max_push_per_run={max_push},截断取前 {max_push}")
+            batch = batch[:max_push]
+
+    if not batch:
+        print("[main] 无需要推送的重要新闻")
+    else:
+        # 7. 推送
+        if mode == "MORNING":
+            window_str = state.quiet_window_string(quiet_start, quiet_end)
+            title_prefix = str(rules.get("morning_title_prefix", "🌞 早报")).strip()
+            morning_header = str(rules.get("morning_header", "🌞 早报")).strip()
+            header_note = (
+                f"**{morning_header}**\n\n"
+                f"📅 覆盖时段: {window_str}\n"
+                f"📋 共 {len(batch)} 条,已按热度排序"
+            )
+            print(f"[main] 晨间汇总推送 {len(batch)} 条 → 合并成 1 条消息(覆盖: {window_str})")
+        else:
+            header_note = None
+            title_prefix = None
+            print(f"[main] 批量推送 {len(batch)} 条 → 合并成 1 条消息")
+
+        status = push_to_serverchan_batch(
+            batch, state,
+            daily_limit=daily_limit,
+            title_prefix=title_prefix,
+            header_note=header_note,
+        )
+        if mode == "MORNING":
+            if status == "pushed":
+                # 只有真正推送成功时才标记"今日晨间汇总已发"并清空队列
+                state.mark_morning_digest_sent()
+                state.clear_night_queue()
+                print(f"[main] 晨间汇总已成功发送,队列清空,今日不再二次发送晨间汇总")
+            else:
+                # 失败(网络/配额/无key等):保留队列 + 不写日期标记,下次 run 仍当 MORNING 重试
+                print(f"[main] 晨间汇总推送失败(status={status}),保留队列等待下次重试,不清空")
         if status == "quota_exhausted":
-            print("[main] Server酱 配额耗尽,停止本次推送")
-            break
+            print("[main] Server酱 配额耗尽,后续批次不再推送")
 
     return 0
 

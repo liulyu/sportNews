@@ -52,6 +52,11 @@ class State:
         self.pushed_normalized: list[str] = []
         # url -> [{"t": iso, "replies": int, "likes": int}, ...]
         self.hotness_history: dict[str, list] = {}
+        # --- 夜间静音 + 晨间汇总 ---
+        # 静音期候选队列: [{"title","url","source","section","replies","likes","fetched_at"}, ...]
+        self.night_queue: list[dict] = []
+        # 今天是否已发晨间汇总(如 "2026-08-22", 空表示未发)
+        self.last_morning_digest_date: str = ""
 
     # ---- 加载/保存 ----
     @classmethod
@@ -70,6 +75,8 @@ class State:
             st.pushed = data.get("pushed", {})
             st.pushed_normalized = data.get("pushed_normalized", [])
             st.hotness_history = data.get("hotness_history", {})
+            st.night_queue = data.get("night_queue", [])
+            st.last_morning_digest_date = data.get("last_morning_digest_date", "")
         except (OSError, json.JSONDecodeError) as e:
             print(f"[state] 加载 {path} 失败,从空状态开始: {e}")
         return st
@@ -84,6 +91,8 @@ class State:
             "pushed": self.pushed,
             "pushed_normalized": self.pushed_normalized,
             "hotness_history": self.hotness_history,
+            "night_queue": self.night_queue,
+            "last_morning_digest_date": self.last_morning_digest_date,
         }
 
     def save(self, path: str = DEFAULT_PATH) -> None:
@@ -182,6 +191,90 @@ class State:
         if not first:
             return None
         return (datetime.now(BEIJING_TZ) - first).total_seconds() / 3600
+
+    # ---- 运行模式判断 (静音 / 晨间汇总 / 正常) ----
+    @staticmethod
+    def _quiet_hours(start: int, end: int) -> set[int]:
+        """把 [start, end) 转成小时集合(支持跨午夜)。"""
+        hours = set()
+        h = start % 24
+        end_mod = end % 24
+        while True:
+            hours.add(h)
+            h = (h + 1) % 24
+            if h == end_mod:
+                break
+        return hours
+
+    def get_run_mode(self, quiet_start_hour: int, quiet_end_hour: int) -> str:
+        """返回 "QUIET" / "MORNING" / "NORMAL"。"""
+        now = datetime.now(BEIJING_TZ)
+        today = now.strftime("%Y-%m-%d")
+        quiet = self._quiet_hours(quiet_start_hour, quiet_end_hour)
+        if now.hour in quiet:
+            return "QUIET"
+        if self.last_morning_digest_date != today:
+            # 非静音时段且今天晨间汇总还没发
+            return "MORNING"
+        return "NORMAL"
+
+    def quiet_window_string(self, quiet_start_hour: int, quiet_end_hour: int) -> str:
+        """返回类似 "2026-08-21 23:00 ~ 2026-08-22 07:08" 的覆盖时段字符串(北京时间)。
+
+        跨午夜时 end_candidate 会自动 +1 天,保证 end >= start。
+        """
+        now = datetime.now(BEIJING_TZ)
+        start_candidate = now.replace(
+            hour=quiet_start_hour % 24, minute=0, second=0, microsecond=0
+        )
+        if start_candidate > now:
+            # 起点在未来 → 应该往前推一天(静音期是从昨天这个点开始的)
+            start_candidate -= timedelta(days=1)
+        end_candidate = now.replace(
+            hour=quiet_end_hour % 24, minute=0, second=0, microsecond=0
+        )
+        # 跨午夜修正:end <= start 说明 end 应该落在下一天
+        if end_candidate <= start_candidate:
+            end_candidate += timedelta(days=1)
+        end = min(now, end_candidate)
+        return (
+            f"{start_candidate.strftime('%Y-%m-%d %H:%M')}"
+            f" ~ {end.strftime('%Y-%m-%d %H:%M')}"
+        )
+
+    # ---- 夜间静音队列 ----
+    def enqueue_night_candidates(self, items, cap: int) -> int:
+        """把候选 NewsItem 列表按 URL 去重并入队。超过 cap 按热度取前 cap。
+
+        返回实际新增了多少条。
+        """
+        existing_urls = {it.get("url") for it in self.night_queue}
+        for it in items:
+            if it.url in existing_urls:
+                continue
+            self.night_queue.append({
+                "title": it.title,
+                "url": it.url,
+                "source": it.source,
+                "section": it.section,
+                "replies": it.replies,
+                "likes": it.likes,
+                "fetched_at": it.fetched_at or "",
+            })
+            existing_urls.add(it.url)
+        # 超过 cap 时按热度排序,保留前 cap
+        if len(self.night_queue) > cap:
+            self.night_queue.sort(
+                key=lambda d: d.get("replies", 0) + d.get("likes", 0) * 5, reverse=True
+            )
+            self.night_queue = self.night_queue[:cap]
+        return len(items)
+
+    def clear_night_queue(self) -> None:
+        self.night_queue = []
+
+    def mark_morning_digest_sent(self, today: str | None = None) -> None:
+        self.last_morning_digest_date = today or _today_key()
 
     # ---- 健康状态 ----
     def mark_run_started(self) -> None:
