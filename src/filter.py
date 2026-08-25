@@ -60,8 +60,15 @@ def filter_and_rank(
     keyword_boost: list[str],
     keyword_block: list[str],
     skip_freshness: bool = False,
+    threshold_multiplier: float = 1.0,
 ) -> List[NewsItem]:
-    """返回通过过滤的候选列表(已排序、已截断)。"""
+    """返回通过过滤的候选列表(已排序、已截断)。
+
+    threshold_multiplier: 统一对绝对热度阈值 / 蹿升速度阈值做倍率缩放。
+      - 1.0 = 正常
+      - 0.5 = 阈值减半(静音时段夜间没人回帖,需放宽以便有新事件也能入队)
+      - 2.0 = 加严(特殊场景预留)
+    """
     if not items:
         return []
 
@@ -77,9 +84,12 @@ def filter_and_rank(
     cross_threshold = rules.get("cross_source_dedup_threshold", 0.6)
     freshness_hours = rules.get("freshness_hours", 6)
 
-    # 应用冷启动倍率
-    eff_min_replies = min_replies * (cold_mul if cold else 1.0)
-    eff_min_likes = min_likes * (cold_mul if cold else 1.0)
+    # 应用冷启动倍率 + 外部传入的阈值倍率(静音时段用)
+    cold_factor = (cold_mul if cold else 1.0)
+    eff_min_replies = min_replies * cold_factor * threshold_multiplier
+    eff_min_likes   = min_likes   * cold_factor * threshold_multiplier
+    eff_v_replies   = v_replies                        * threshold_multiplier
+    eff_v_likes     = v_likes                          * threshold_multiplier
 
     daily_pushed_so_far = state.daily_pushed_count()
 
@@ -146,7 +156,7 @@ def filter_and_rank(
             rising = False
             if velocity:
                 v_r, v_l = velocity
-                if v_r >= v_replies or v_l >= v_likes:
+                if v_r >= eff_v_replies or v_l >= eff_v_likes:
                     rising = True
 
             if abs_hot:

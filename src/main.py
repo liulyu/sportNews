@@ -141,10 +141,11 @@ def run_monitor(config: dict, state: State, dry_run: bool = False) -> int:
         print(f"[main] 晨间汇总:夜间队列 {len(state.night_queue)} 条 + 本次抓取 {len(items)} 条 → 合并 {len(filter_input)} 条再过滤")
 
     # 5. 过滤
-    #   - QUIET: 跳过新鲜度窗口,夜间新闻不该被 freshness_hours 挡住
-    #   - MORNING: 跳过新鲜度(夜间新闻已经在队列里挂了 N 小时,不能用 2h 窗口拦)
-    #   - NORMAL: 正常新鲜度(freshness_hours 生效)
+    #   - QUIET:  跳过新鲜度 + 阈值 ×0.5(放宽,夜间回帖慢,让新事件能入队)
+    #   - MORNING:跳过新鲜度(夜间新闻已经在队列里挂了 N 小时,不能用 2h 窗口拦)
+    #   - NORMAL: 正常新鲜度 + 正常阈值
     skip_fresh = mode in ("QUIET", "MORNING")
+    thr_mul = 0.5 if mode == "QUIET" else 1.0
     candidates = filter_and_rank(
         filter_input,
         state,
@@ -152,8 +153,56 @@ def run_monitor(config: dict, state: State, dry_run: bool = False) -> int:
         config.get("keyword_boost", []),
         config.get("keyword_block", []),
         skip_freshness=skip_fresh,
+        threshold_multiplier=thr_mul,
     )
-    print(f"[main] 过滤后候选 {len(candidates)} 条")
+    print(f"[main] 过滤后候选 {len(candidates)} 条 (阈值倍率={thr_mul}, skip_freshness={skip_fresh})")
+
+    # === MORNING 模式:只保留"静音时段内首次出现"或"昨晚 QUIET 已入队"的新闻
+    #    防止 7 点首页里带进来的"昨天白天旧热帖"占了早报版面(它们应走白天 NORMAL)
+    if mode == "MORNING":
+        # 计算本周期静音起点/终点(北京时间)
+        # 规则: 今天的静音期是 [昨晚 quiet_start 点, 今早 quiet_end 点)
+        morning_now = now_beijing
+        q_start = morning_now.replace(
+            hour=quiet_start % 24, minute=0, second=0, microsecond=0
+        )
+        if q_start > morning_now:
+            q_start -= timedelta(days=1)
+        q_end = morning_now.replace(
+            hour=quiet_end % 24, minute=0, second=0, microsecond=0
+        )
+        if q_end <= q_start:
+            q_end += timedelta(days=1)
+        # 夜间队列 URL 白名单(昨晚已判候选的)
+        night_queue_urls = {d.get("url") for d in state.night_queue if d.get("url")}
+        kept: list[NewsItem] = []
+        from_night_url = 0
+        from_first_seen = 0
+        from_items = len(candidates)
+        for c in candidates:
+            from_queue = c.url in night_queue_urls
+            first_seen = state.get_first_seen(c.url)
+            within_quiet = first_seen is not None and q_start <= first_seen <= q_end
+            # 首次见到的 URL(今次 7 点 run 才第一次进入 hotness_history)
+            #   → 虽然在窗口外,但它是 7 点刚出的新闻,应该被早报收录(否则要等 8 点 NORMAL)
+            brand_new = first_seen is None
+            if from_queue:
+                from_night_url += 1
+                kept.append(c)
+            elif within_quiet:
+                from_first_seen += 1
+                kept.append(c)
+            elif brand_new:
+                kept.append(c)
+                from_first_seen += 1  # 当作"今早刚发生的"算入夜间时段
+            # else:首次出现时间在昨天白天 → 丢弃,走 NORMAL
+        print(
+            f"[main] 晨间汇总候选过滤:过滤前 {from_items} 条,"
+            f" 属于夜间队列 {from_night_url} 条,"
+            f" 静音窗口首次出现/今早刚出 {from_first_seen} 条,"
+            f" 最终保留 {len(kept)} 条(丢弃 {from_items - len(kept)} 条属于昨天白天的旧热帖)"
+        )
+        candidates = kept
 
     if dry_run:
         for c in candidates:
@@ -168,7 +217,7 @@ def run_monitor(config: dict, state: State, dry_run: bool = False) -> int:
     if mode == "QUIET":
         if candidates:
             state.enqueue_night_candidates(candidates, morning_cap)
-            print(f"[main] 静音模式:入队 {len(candidates)} 条,队列当前 {len(state.night_queue)} 条")
+            print(f"[main] 静音模式:入队 {len(candidates)} 条,队列当前 {len(state.night_queue)} 条(阈值减半放宽)")
         else:
             print("[main] 静音模式:无新候选")
         return 0
