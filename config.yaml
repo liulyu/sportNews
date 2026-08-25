@@ -43,14 +43,20 @@ rules:
 
   # --- 夜间静音 + 晨间汇总 ---
   # 北京时区静音时段: quiet_start_hour 时起(含) 到 quiet_end_hour 时止(不含)
-  quiet_start_hour: 23               # 23:00 之后不推送
-  quiet_end_hour: 7                  # 07:00 之后解除静音
+  quiet_start_hour: 0                # 00:00 之后不推送(临睡前 22:00 最后一次正常推)
+  quiet_end_hour: 8                  # 静音期统计到今早 08:00(08:00 那轮发早报,含 07:xx 刚出的新鲜事)
   # 静音队列最多保留多少条候选(按综合热度取前 N, 防 state 膨胀)
   morning_queue_cap: 50
   # 晨间汇总标题前缀(≤10字,出现在微信通知栏 title 最前 + desp 大标题开头)
   morning_title_prefix: "🌞 早报"
   # 晨间汇总 desp 顶部加粗的大标题(一行即可,不要加换行)
   morning_header: "🌞 早报"
+
+# 运行诊断日志:本地 pull 即可查看每次 Actions 实际跑的情况(不登 GitHub 也能查)
+# 每次 run 追加一行 JSON (模式/抓取/候选/LLM important/推送状态)
+run_log:
+  file: "data/run_log.jsonl"   # 保存路径
+  keep_lines: 200               # 最多保留最近 N 行(超过自动截断最旧的)
 
 # 加权关键词(降低热度阈值至 50%)
 keyword_boost:

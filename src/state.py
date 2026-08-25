@@ -276,6 +276,28 @@ class State:
     def mark_morning_digest_sent(self, today: str | None = None) -> None:
         self.last_morning_digest_date = today or _today_key()
 
+    # ---- 运行诊断日志(不登 GitHub 也能查每次 run 的情况) ----
+    def append_run_log(self, log_file: str, keep_lines: int, entry: dict[str, Any]) -> None:
+        """追加一行 JSON 到 run_log.jsonl(时间自动加 ts 字段)。超 keep_lines 时截断最老的行。"""
+        entry = {"ts": _now_iso(), **{k: v for k, v in entry.items() if k != "ts"}}
+        os.makedirs(os.path.dirname(log_file) or ".", exist_ok=True)
+        # 读现有行
+        lines: list[str] = []
+        if os.path.exists(log_file):
+            try:
+                with open(log_file, "r", encoding="utf-8") as f:
+                    lines = [ln for ln in f.read().splitlines() if ln.strip()]
+            except OSError:
+                lines = []
+        lines.append(json.dumps(entry, ensure_ascii=False))
+        if len(lines) > keep_lines:
+            lines = lines[-keep_lines:]
+        tmp_path = log_file + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+            f.write("\n")
+        os.replace(tmp_path, log_file)
+
     # ---- 健康状态 ----
     def mark_run_started(self) -> None:
         self.last_run = _now_iso()
